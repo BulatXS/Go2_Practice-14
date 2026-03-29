@@ -1,0 +1,9 @@
+go 1.25.1
+
+use (
+	./services/auth
+	./services/tasks
+	./shared
+	./services/graphql
+	./services/worker/cmd
+)
