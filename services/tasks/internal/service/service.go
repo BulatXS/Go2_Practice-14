@@ -12,6 +12,7 @@ import (
 	"singularity.com/pr14/services/tasks/internal/rabbit"
 	"singularity.com/pr14/services/tasks/internal/repository"
 
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -22,6 +23,13 @@ type TaskService struct {
 	ttl      time.Duration
 	jitter   time.Duration
 	counter  uint64
+}
+
+type ProcessTaskJob struct {
+	Job       string `json:"job"`
+	TaskID    string `json:"task_id"`
+	Attempt   int    `json:"attempt"`
+	MessageID string `json:"message_id"`
 }
 
 func NewTaskService(
@@ -82,22 +90,27 @@ func (s *TaskService) invalidateTaskCache(ctx context.Context, id string) {
 	}
 }
 
-func (s *TaskService) publishTaskCreated(taskID string) {
+func (s *TaskService) EnqueueProcessTask(taskID, messageID string) (ProcessTaskJob, error) {
 	if s.producer == nil {
-		return
+		return ProcessTaskJob{}, fmt.Errorf("rabbitmq producer is unavailable")
 	}
 
-	event := rabbit.TaskEvent{
-		Event:    "task.created",
-		TaskID:   taskID,
-		TS:       time.Now().UTC().Format(time.RFC3339),
-		Producer: "tasks",
-		Version:  "v1",
+	if messageID == "" {
+		messageID = uuid.NewString()
 	}
 
-	if err := s.producer.Publish(event); err != nil {
-		log.Printf("rabbit publish failed: %v", err)
+	job := ProcessTaskJob{
+		Job:       "process_task",
+		TaskID:    taskID,
+		Attempt:   1,
+		MessageID: messageID,
 	}
+
+	if err := s.producer.Publish(job); err != nil {
+		return ProcessTaskJob{}, err
+	}
+
+	return job, nil
 }
 
 func (s *TaskService) Create(ctx context.Context, title, description, dueDate string) (Task, error) {
@@ -122,8 +135,6 @@ func (s *TaskService) Create(ctx context.Context, title, description, dueDate st
 		DueDate:     task.DueDate,
 		Done:        task.Done,
 	}
-
-	s.publishTaskCreated(task.ID)
 
 	return result, nil
 }

@@ -25,6 +25,11 @@ func NewHandler(svc *service.TaskService, log *logrus.Logger) *Handler {
 }
 
 func (h *Handler) authorize(w http.ResponseWriter, r *http.Request) bool {
+	authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+	if authHeader == "Bearer demo-token" {
+		return true
+	}
+
 	sessionCookie, err := r.Cookie("session")
 	if err != nil || sessionCookie.Value != "demo-session" {
 		h.log.WithFields(logrus.Fields{
@@ -38,6 +43,52 @@ func (h *Handler) authorize(w http.ResponseWriter, r *http.Request) bool {
 	}
 
 	return true
+}
+
+func (h *Handler) ProcessTaskJob(w http.ResponseWriter, r *http.Request) {
+	if !h.authorize(w, r) {
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		TaskID    string `json:"task_id"`
+		MessageID string `json:"message_id"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.log.WithFields(logrus.Fields{
+			"request_id": middleware.GetRequestID(r.Context()),
+			"component":  "handler",
+			"error":      err.Error(),
+		}).Warn("invalid process-task request body")
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	req.TaskID = strings.TrimSpace(req.TaskID)
+	if req.TaskID == "" {
+		http.Error(w, "task_id is required", http.StatusBadRequest)
+		return
+	}
+
+	job, err := h.svc.EnqueueProcessTask(req.TaskID, strings.TrimSpace(req.MessageID))
+	if err != nil {
+		h.log.WithFields(logrus.Fields{
+			"request_id": middleware.GetRequestID(r.Context()),
+			"component":  "rabbitmq",
+			"error":      err.Error(),
+			"task_id":    req.TaskID,
+		}).Error("enqueue process-task job failed")
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, job)
 }
 
 func (h *Handler) Tasks(w http.ResponseWriter, r *http.Request) {

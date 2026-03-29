@@ -3,15 +3,16 @@ package rabbit
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
 type Producer struct {
-	conn    *amqp.Connection
-	channel *amqp.Channel
-	queue   amqp.Queue
+	conn      *amqp.Connection
+	channel   *amqp.Channel
+	queueName string
 }
 
 type TaskEvent struct {
@@ -23,7 +24,13 @@ type TaskEvent struct {
 	Version   string `json:"version,omitempty"`
 }
 
-func NewProducer(url, queueName string) (*Producer, error) {
+type QueueTopology struct {
+	MainQueue string
+	DLXName   string
+	DLQName   string
+}
+
+func NewProducer(url string, topology QueueTopology) (*Producer, error) {
 	conn, err := amqp.Dial(url)
 	if err != nil {
 		return nil, err
@@ -35,8 +42,62 @@ func NewProducer(url, queueName string) (*Producer, error) {
 		return nil, err
 	}
 
+	if err := declareTopology(ch, topology); err != nil {
+		_ = ch.Close()
+		_ = conn.Close()
+		return nil, err
+	}
+
+	return &Producer{
+		conn:      conn,
+		channel:   ch,
+		queueName: topology.MainQueue,
+	}, nil
+}
+
+func declareTopology(ch *amqp.Channel, topology QueueTopology) error {
+	if topology.MainQueue == "" {
+		return fmt.Errorf("main queue name is required")
+	}
+
+	args := amqp.Table{}
+	if topology.DLXName != "" {
+		if err := ch.ExchangeDeclare(
+			topology.DLXName,
+			"direct",
+			true,
+			false,
+			false,
+			false,
+			nil,
+		); err != nil {
+			return err
+		}
+
+		args["x-dead-letter-exchange"] = topology.DLXName
+		if topology.DLQName != "" {
+			args["x-dead-letter-routing-key"] = topology.DLQName
+		}
+	}
+
+	_, err := ch.QueueDeclare(
+		topology.MainQueue,
+		true,
+		false,
+		false,
+		false,
+		args,
+	)
+	if err != nil {
+		return err
+	}
+
+	if topology.DLQName == "" {
+		return nil
+	}
+
 	q, err := ch.QueueDeclare(
-		queueName,
+		topology.DLQName,
 		true,
 		false,
 		false,
@@ -44,16 +105,20 @@ func NewProducer(url, queueName string) (*Producer, error) {
 		nil,
 	)
 	if err != nil {
-		_ = ch.Close()
-		_ = conn.Close()
-		return nil, err
+		return err
 	}
 
-	return &Producer{
-		conn:    conn,
-		channel: ch,
-		queue:   q,
-	}, nil
+	if topology.DLXName == "" {
+		return nil
+	}
+
+	return ch.QueueBind(
+		q.Name,
+		q.Name,
+		topology.DLXName,
+		false,
+		nil,
+	)
 }
 
 func (p *Producer) Publish(event any) error {
@@ -68,7 +133,7 @@ func (p *Producer) Publish(event any) error {
 	return p.channel.PublishWithContext(
 		ctx,
 		"",
-		p.queue.Name,
+		p.queueName,
 		false,
 		false,
 		amqp.Publishing{

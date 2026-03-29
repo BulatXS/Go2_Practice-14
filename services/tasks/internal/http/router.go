@@ -61,10 +61,16 @@ func NewRouter(log *logrus.Logger) http.Handler {
 
 	rabbitURL := os.Getenv("RABBIT_URL")
 	queueName := os.Getenv("QUEUE_NAME")
+	dlxName := getEnv("DLX_NAME", "task_jobs_dlx")
+	dlqName := getEnv("DLQ_NAME", "task_jobs_dlq")
 
 	var producer *rabbit.Producer
 	if rabbitURL != "" && queueName != "" {
-		p, err := rabbit.NewProducer(rabbitURL, queueName)
+		p, err := rabbit.NewProducer(rabbitURL, rabbit.QueueTopology{
+			MainQueue: queueName,
+			DLXName:   dlxName,
+			DLQName:   dlqName,
+		})
 		if err != nil {
 			serviceLog.WithFields(logrus.Fields{
 				"component": "rabbitmq",
@@ -93,6 +99,7 @@ func NewRouter(log *logrus.Logger) http.Handler {
 	mux.HandleFunc("/v1/tasks/search", handler.SearchTasks)
 	mux.HandleFunc("/v1/tasks", handler.Tasks)
 	mux.HandleFunc("/v1/tasks/", handler.TaskByID)
+	mux.HandleFunc("/v1/jobs/process-task", handler.ProcessTaskJob)
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -126,4 +133,13 @@ func getEnvInt(name string, fallback int) int {
 	}
 
 	return value
+}
+
+func getEnv(name, fallback string) string {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback
+	}
+
+	return raw
 }
